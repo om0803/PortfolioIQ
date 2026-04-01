@@ -5,6 +5,9 @@
 import dotenv from "dotenv";
 dotenv.config();
 
+// Disable SSL verification for development (handles certificate issues)
+process.env.NODE_TLS_REJECT_UNAUTHORIZED = "0";
+
 import { TOOL_DEFINITIONS, executeTool } from "./tools.js";
 import { CLIENTS } from "./data/sample_data.js";
 
@@ -71,23 +74,29 @@ async function callLLM(messages, tools = null) {
     body.tool_choice = "auto";
   }
 
-  const res = await fetch(OPENROUTER_URL, {
-    method: "POST",
-    headers: {
-      "Content-Type": "application/json",
-      "Authorization": `Bearer ${OPENROUTER_API_KEY}`,
-      "HTTP-Referer": "http://localhost:3001",
-      "X-Title": "LPL Advisor Copilot Agent"
-    },
-    body: JSON.stringify(body)
-  });
+  try {
+    const res = await fetch(OPENROUTER_URL, {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        "Authorization": `Bearer ${OPENROUTER_API_KEY}`,
+        "HTTP-Referer": "http://localhost:3001",
+        "X-Title": "LPL Advisor Copilot Agent"
+      },
+      body: JSON.stringify(body)
+    });
 
-  if (!res.ok) {
-    const errText = await res.text();
-    throw new Error(`OpenRouter API error ${res.status}: ${errText}`);
+    if (!res.ok) {
+      const errText = await res.text();
+      console.error(`[Agent] HTTP ${res.status}:`, errText);
+      throw new Error(`OpenRouter API error ${res.status}: ${errText}`);
+    }
+
+    return res.json();
+  } catch (err) {
+    console.error(`[Agent] Fetch error:`, err.message);
+    throw err;
   }
-
-  return res.json();
 }
 
 

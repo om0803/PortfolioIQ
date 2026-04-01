@@ -35,7 +35,11 @@ export async function runPipeline(newsCount = 3) {
     news.forEach(n => console.log(`  → ${n.headline}`));
 
     // Save news to DB
-    await saveNewsEvents(news);
+    try {
+      await saveNewsEvents(news);
+    } catch (dbErr) {
+      console.warn(`[Pipeline] Warning: Could not save to DB - ${dbErr.message}`);
+    }
 
     // Step 2: Run analytics
     console.log(`\n[Pipeline] Step 2: Running analytics engine...`);
@@ -64,10 +68,15 @@ export async function runPipeline(newsCount = 3) {
     result.error = err.message;
     result.completed_at = new Date();
     console.error(`\n[Pipeline] FAILED:`, err.message);
+    console.error(`[Pipeline] Full error:`, err);
   }
 
   // Save pipeline run to DB
-  await savePipelineRun(result);
+  try {
+    await savePipelineRun(result);
+  } catch (dbErr) {
+    console.warn(`[Pipeline] Warning: Could not save pipeline run - ${dbErr.message}`);
+  }
 
   return result;
 }
