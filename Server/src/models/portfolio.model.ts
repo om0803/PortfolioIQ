@@ -12,11 +12,11 @@ export interface IHolding {
 
 export interface IPortfolio extends Document {
   client_id: string;
+  client_name: string;
   portfolio_value: number;
-  risk_profile: "low" | "medium" | "high";
-  investment_horizon_years: number;
+  risk_tolerance: "low" | "medium" | "high";
+  time_horizon_years: number;
   holdings: IHolding[];
-  created_at: Date;
 }
 
 const HoldingSchema = new Schema<IHolding>(
@@ -35,15 +35,15 @@ const HoldingSchema = new Schema<IHolding>(
 const PortfolioSchema = new Schema<IPortfolio>(
   {
     client_id: { type: String, required: true }, // ❌ removed unique
+    client_name: { type: String, required: true },
     portfolio_value: { type: Number, required: true },
-    risk_profile: {
+    risk_tolerance: {
       type: String,
       enum: ["low", "medium", "high"],
       required: true,
     },
-    investment_horizon_years: { type: Number, required: true },
+    time_horizon_years: { type: Number, required: true },
     holdings: { type: [HoldingSchema], required: true },
-    created_at: { type: Date, default: Date.now },
   },
   { timestamps: true }
 );

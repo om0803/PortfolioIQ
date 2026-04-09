@@ -5,7 +5,7 @@ import mongoose from "mongoose";
 import Portfolio, { IHolding } from "../models/portfolio.model";
 
 const MONGO_URI =
-  process.env.MONGO_URI || process.env.MONGODB_ACCESS_URI || "mongodb+srv://vns444555_db_user:gw3cpBkxCvqHOgqk@cluster-main.imjr9lg.mongodb.net/?appName=Cluster-main";
+  process.env.MONGO_URI || process.env.MONGODB_ACCESS_URI || "";
 const TARGET_DB = "portfolio-db";
 
 /* ---------------- ASSETS ---------------- */
@@ -39,6 +39,14 @@ const randInt = (min: number, max: number) =>
 
 const pick = (arr: any[], n: number) =>
   [...arr].sort(() => 0.5 - Math.random()).slice(0, n);
+
+const CLIENT_NAMES = [
+  "James Smith",
+  "Emma Johnson",
+  "Michael Brown",
+  "Olivia Davis",
+  "William Miller",
+];
 
 /* ---------------- HOLDINGS ---------------- */
 
@@ -83,13 +91,10 @@ async function seed() {
   console.log("Deleting old portfolios...");
   await Portfolio.deleteMany({}); // 🔥 IMPORTANT
 
-  const risks: ("low" | "medium" | "high")[] = [
-    ...Array(7).fill("low"),
-    ...Array(6).fill("medium"),
-    ...Array(7).fill("high"),
-  ].sort(() => 0.5 - Math.random());
+  const riskOptions: ("low" | "medium" | "high")[] = ["low", "medium", "high"];
 
-  const portfolios = risks.map((risk, i) => {
+  const portfolios = CLIENT_NAMES.map((clientName, i) => {
+    const risk = riskOptions[randInt(0, riskOptions.length - 1)];
     const value =
       risk === "low"
         ? randInt(50_000, 200_000)
@@ -99,9 +104,10 @@ async function seed() {
 
     return {
       client_id: `CLT-${Date.now()}-${i}`, // always unique
+      client_name: clientName,
       portfolio_value: value,
-      risk_profile: risk,
-      investment_horizon_years: randInt(1, 15),
+      risk_tolerance: risk,
+      time_horizon_years: randInt(1, 15),
       holdings: buildHoldings(value),
     };
   });
