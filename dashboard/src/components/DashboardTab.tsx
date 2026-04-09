@@ -1,5 +1,6 @@
 "use client";
 
+import { useRouter } from "next/navigation";
 import { CheckCircle2, XCircle, Loader2 } from "lucide-react";
 import type { Alert, Client, Insight, PipelineRun } from "@/types";
 
@@ -38,6 +39,7 @@ interface DashboardTabProps {
 }
 
 export default function DashboardTab({ alerts, clients, insights, runs }: DashboardTabProps) {
+  const router = useRouter();
   const activeAlerts = alerts.filter((a) => a.status === "active");
   const criticalAlerts = activeAlerts.filter((a) => a.severity === "CRITICAL");
   const warningAlerts = activeAlerts.filter((a) => a.severity === "WARNING");
@@ -165,7 +167,8 @@ export default function DashboardTab({ alerts, clients, insights, runs }: Dashbo
               {leaderboard.map((row) => (
                 <tr
                   key={row.client_id}
-                  className="border-b border-slate-100 transition hover:bg-slate-50"
+                  className="border-b border-slate-100 cursor-pointer transition hover:bg-indigo-50/50"
+                  onClick={() => router.push(`/client/${row.client_id}`)}
                 >
                   {/* Client name */}
                   <td className="px-5 py-3.5">

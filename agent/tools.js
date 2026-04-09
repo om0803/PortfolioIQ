@@ -122,7 +122,7 @@ const toolImplementations = {
       sectorBreakdown[h.sector] = (sectorBreakdown[h.sector] || 0) + h.weight_pct;
     }
 
-    const varMetrics = computeVaR(client);
+    const varMetrics = await computeVaR(client);
 
     return {
       client_id: client.client_id,
@@ -133,7 +133,20 @@ const toolImplementations = {
       time_horizon_years: client.time_horizon_years,
       holdings: holdingDetails,
       sector_breakdown: sectorBreakdown,
-      var_metrics: varMetrics
+      risk_metrics: {
+        var_95: varMetrics.var_95,
+        var_99: varMetrics.var_99,
+        cvar_95: varMetrics.cvar_95,
+        volatility_pct: varMetrics.volatility_pct,
+        beta: varMetrics.beta,
+        max_drawdown_pct: varMetrics.max_drawdown_pct,
+        risk_level: varMetrics.risk_level,
+        risk_drivers: varMetrics.risk_drivers,
+        hhi: varMetrics.hhi,
+        effective_assets: varMetrics.effective_assets,
+        top_3_concentration_pct: varMetrics.top_3_concentration_pct,
+        sector_exposure: varMetrics.sector_exposure
+      }
     };
   }
 };

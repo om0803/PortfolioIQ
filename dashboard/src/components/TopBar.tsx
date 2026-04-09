@@ -1,8 +1,9 @@
 "use client";
 
 import type { ReactNode } from "react";
+import { useRouter, usePathname } from "next/navigation";
 import type { TabId } from "@/types";
-import { Zap, Loader2, Play, LayoutDashboard, Bell, BarChart3, Settings } from "lucide-react";
+import { Zap, Loader2, Play, LayoutDashboard, Bell, BarChart3, Settings, TrendingUp } from "lucide-react";
 
 const TABS: { id: TabId; label: string; icon: ReactNode }[] = [
   { id: "dashboard", label: "Dashboard", icon: <LayoutDashboard className="h-3.5 w-3.5" /> },
@@ -20,12 +21,19 @@ interface TopBarProps {
 }
 
 export default function TopBar({ status, running, onRun, activeTab, onTabChange }: TopBarProps) {
+  const router = useRouter();
+  const pathname = usePathname();
+  const isPerformancePage = pathname === "/performance";
+
   return (
     <div className="sticky top-0 z-50 bg-blue-600 shadow-sm">
       <div className="flex items-center justify-between px-6 py-2">
         {/* Left: logo + tabs */}
         <div className="flex items-center gap-6">
-          <div className="flex items-center gap-2.5">
+          <div
+            className="flex items-center gap-2.5 cursor-pointer"
+            onClick={() => router.push("/")}
+          >
             <div className="flex h-7 w-7 items-center justify-center rounded-lg bg-white/20">
               <Zap className="h-3.5 w-3.5 text-white" />
             </div>
@@ -39,9 +47,12 @@ export default function TopBar({ status, running, onRun, activeTab, onTabChange 
             {TABS.map((tab) => (
               <button
                 key={tab.id}
-                onClick={() => onTabChange(tab.id)}
+                onClick={() => {
+                  if (isPerformancePage) router.push("/");
+                  onTabChange(tab.id);
+                }}
                 className={`inline-flex items-center gap-1.5 rounded-md px-3 py-1.5 text-[12px] font-medium transition-all ${
-                  activeTab === tab.id
+                  activeTab === tab.id && !isPerformancePage
                     ? "bg-white/20 text-white"
                     : "text-blue-200 hover:bg-white/10 hover:text-white"
                 }`}
@@ -49,6 +60,18 @@ export default function TopBar({ status, running, onRun, activeTab, onTabChange 
                 {tab.icon} {tab.label}
               </button>
             ))}
+
+            {/* Performance link */}
+            <button
+              onClick={() => router.push("/performance")}
+              className={`inline-flex items-center gap-1.5 rounded-md px-3 py-1.5 text-[12px] font-medium transition-all ${
+                isPerformancePage
+                  ? "bg-white/20 text-white"
+                  : "text-blue-200 hover:bg-white/10 hover:text-white"
+              }`}
+            >
+              <TrendingUp className="h-3.5 w-3.5" /> Performance
+            </button>
           </nav>
         </div>
 

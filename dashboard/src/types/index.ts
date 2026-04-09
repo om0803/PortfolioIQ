@@ -45,4 +45,77 @@ export interface Client {
   risk_tolerance: string;
 }
 
+export interface Holding {
+  ticker: string;
+  name: string;
+  sector: string;
+  weight_pct: number;
+  value: number;
+  beta: number;
+}
+
+export interface RiskMetrics {
+  var_95: number;
+  var_99: number;
+  cvar_95: number;
+  volatility_pct: number;
+  vol_source: string;
+  beta: number;
+  max_drawdown_pct: number;
+  risk_score: number;
+  risk_category: string;
+  risk_level: string;
+  risk_source: string;
+  risk_drivers: string[];
+  hhi: number;
+  effective_assets: number;
+  top_3_concentration_pct: number;
+  sector_exposure: Record<string, number>;
+}
+
+export interface ClientDetails {
+  client_id: string;
+  name: string;
+  age: number;
+  portfolio_value: number;
+  risk_tolerance: string;
+  time_horizon_years: number;
+  holdings: Holding[];
+  sector_breakdown: Record<string, number>;
+  risk_metrics: RiskMetrics;
+  alerts: Alert[];
+  insights: Insight[];
+}
+
 export type TabId = "dashboard" | "alerts" | "insights" | "runs";
+
+export interface AnalyticsSnapshot {
+  _id: string;
+  client_id: string;
+  client_name: string;
+  portfolio_value: number;
+  risk_tolerance: string;
+  total_impact_pct: number;
+  total_impact_dollar: number;
+  effective_impact_pct: number;
+  exceeds_threshold: boolean;
+  var_metrics: {
+    var_95: number;
+    var_99: number;
+    cvar_95: number;
+    volatility_pct: number;
+    vol_source: string;
+    beta: number;
+    max_drawdown_pct: number;
+    risk_score: number;
+    risk_category: string;
+    risk_level: string;
+    risk_source: string;
+    risk_drivers: string[];
+    hhi: number;
+    effective_assets: number;
+    top_3_concentration_pct: number;
+    sector_exposure: Record<string, number>;
+  };
+  created_at: string;
+}

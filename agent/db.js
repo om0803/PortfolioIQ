@@ -22,6 +22,7 @@ export async function connectDB() {
   await db.collection("alerts").createIndex({ status: 1 });
   await db.collection("pipeline_runs").createIndex({ started_at: -1 });
   await db.collection("news_events").createIndex({ batch_id: 1 });
+  await db.collection("analytics_snapshots").createIndex({ client_id: 1, created_at: -1 });
 
   return db;
 }
@@ -92,6 +93,53 @@ export async function dismissAlert(alertId) {
   const col = (await getDB()).collection("alerts");
   const { ObjectId } = await import("mongodb");
   return col.updateOne({ _id: new ObjectId(alertId) }, { $set: { status: "dismissed" } });
+}
+
+// ── Analytics Snapshots (per-client, rolling window of 5 each) ───────
+
+/**
+ * Save one analytics snapshot per client.
+ * Each client keeps only its last 5 snapshots — when a 6th arrives the oldest is deleted.
+ */
+export async function saveAnalyticsSnapshots(clientSnapshots) {
+  const col = (await getDB()).collection("analytics_snapshots");
+  const now = new Date();
+  let saved = 0;
+
+  for (const snap of clientSnapshots) {
+    snap.created_at = now;
+    await col.insertOne(snap);
+    saved++;
+
+    // Keep only last 20 per client
+    const count = await col.countDocuments({ client_id: snap.client_id });
+    if (count > 20) {
+      const oldest = await col.find({ client_id: snap.client_id })
+        .sort({ created_at: 1 })
+        .limit(count - 20)
+        .toArray();
+      await col.deleteMany({ _id: { $in: oldest.map(d => d._id) } });
+    }
+  }
+
+  console.log(`[DB] Saved ${saved} client analytics snapshots (20 max per client)`);
+}
+
+/** Get last N snapshots for a specific client (newest first) */
+export async function getClientSnapshots(clientId, limit = 20) {
+  const col = (await getDB()).collection("analytics_snapshots");
+  return col.find({ client_id: clientId }).sort({ created_at: -1 }).limit(limit).toArray();
+}
+
+/** Get the latest snapshot for every client (one per client) */
+export async function getLatestSnapshots() {
+  const col = (await getDB()).collection("analytics_snapshots");
+  return col.aggregate([
+    { $sort: { created_at: -1 } },
+    { $group: { _id: "$client_id", doc: { $first: "$$ROOT" } } },
+    { $replaceRoot: { newRoot: "$doc" } },
+    { $sort: { client_id: 1 } }
+  ]).toArray();
 }
 
 export async function closeConnection() {

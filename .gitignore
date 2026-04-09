@@ -3,6 +3,8 @@ agent/node_modules/
 
 # Environment
 agent/.env
+server/node_modules
+server/.env
 
 # OS files
 .DS_Store

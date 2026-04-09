@@ -6,10 +6,138 @@
 import { CLIENTS, TICKERS, SECTORS, RISK_THRESHOLDS } from "./data/sample_data.js";
 
 // ══════════════════════════════════════════════════════════════════════
-// 1. EVENT CLASSIFICATION + SECTOR IMPACT ESTIMATION
+// 1. EVENT CLASSIFICATION — ML Model (HuggingFace Spaces)
+//    Calls the deployed Event Impact Classifier via Gradio API.
+//    Falls back to keyword rules if the API is unreachable.
 // ══════════════════════════════════════════════════════════════════════
 
-// Keyword → sector impact mappings (simulates ML event impact classifier)
+const HF_EVENT_IMPACT_URL = "https://pranavdeshmukh-event-impact.hf.space/gradio_api/call/predict";
+const HF_RISK_SCORER_URL = "https://pranavdeshmukh-portfolio-risk-score.hf.space/gradio_api/call/predict";
+const HF_VOLATILITY_URL = "https://pranavdeshmukh-volatility-var.hf.space/gradio_api/call/predict";
+const HF_TIMEOUT_MS = 15000;  // 15s max wait
+
+// Sector order expected by the risk scorer model
+const RISK_SCORER_SECTORS = ["tech", "financials", "energy", "healthcare", "bonds", "commodities", "international"];
+
+/**
+ * Call the HF Spaces Portfolio Risk Scorer model.
+ * Input: sector weights as 7 floats [tech, financials, energy, healthcare, bonds, commodities, international]
+ * Returns { risk_score (0-100), risk_category } or null on failure.
+ */
+async function callRiskScorerML(sectorWeights) {
+  try {
+    const submitRes = await fetch(HF_RISK_SCORER_URL, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ data: sectorWeights }),
+      signal: AbortSignal.timeout(HF_TIMEOUT_MS)
+    });
+    if (!submitRes.ok) return null;
+    const { event_id } = await submitRes.json();
+    if (!event_id) return null;
+
+    const resultRes = await fetch(`${HF_RISK_SCORER_URL}/${event_id}`, {
+      signal: AbortSignal.timeout(HF_TIMEOUT_MS)
+    });
+    if (!resultRes.ok) return null;
+
+    const rawText = await resultRes.text();
+    const dataLine = rawText.split("\n").find(line => line.startsWith("data: "));
+    if (!dataLine) return null;
+
+    const parsed = JSON.parse(dataLine.replace("data: ", ""));
+    // parsed = [26.4, "MODERATE"]
+    if (!Array.isArray(parsed) || parsed.length < 2) return null;
+
+    return { risk_score: parsed[0], risk_category: parsed[1] };
+  } catch (err) {
+    console.warn(`[ML] Risk scorer API error: ${err.message}`);
+    return null;
+  }
+}
+
+/**
+ * Call the HF Spaces Volatility/VaR Forecaster (GARCH model).
+ * Input: 7 sector weights, portfolio value, horizon ("1"/"5"/"21"), event severity
+ * Returns { vol_pct, var_95, var_99 } or null on failure.
+ */
+async function callVolatilityML(sectorWeights, portfolioValue, horizon = "1", severity = "LOW") {
+  try {
+    const submitRes = await fetch(HF_VOLATILITY_URL, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ data: [...sectorWeights, portfolioValue, horizon, severity] }),
+      signal: AbortSignal.timeout(HF_TIMEOUT_MS)
+    });
+    if (!submitRes.ok) return null;
+    const { event_id } = await submitRes.json();
+    if (!event_id) return null;
+
+    const resultRes = await fetch(`${HF_VOLATILITY_URL}/${event_id}`, {
+      signal: AbortSignal.timeout(HF_TIMEOUT_MS)
+    });
+    if (!resultRes.ok) return null;
+
+    const rawText = await resultRes.text();
+    const dataLine = rawText.split("\n").find(line => line.startsWith("data: "));
+    if (!dataLine) return null;
+
+    const parsed = JSON.parse(dataLine.replace("data: ", ""));
+    // parsed = [0.767, 12611.47, 17836.64]  (vol%, VaR95$, VaR99$)
+    if (!Array.isArray(parsed) || parsed.length < 3) return null;
+
+    return { vol_pct: parsed[0], var_95: parsed[1], var_99: parsed[2] };
+  } catch (err) {
+    console.warn(`[ML] Volatility API error: ${err.message}`);
+    return null;
+  }
+}
+
+/**
+ * Call the HF Spaces ML model for a single event.
+ * Returns { sector_impacts, confidence } or null on failure.
+ */
+async function callMLModel(headline, description) {
+  try {
+    // Step 1: Submit
+    const submitRes = await fetch(HF_EVENT_IMPACT_URL, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ data: [headline, description] }),
+      signal: AbortSignal.timeout(HF_TIMEOUT_MS)
+    });
+    if (!submitRes.ok) return null;
+    const { event_id } = await submitRes.json();
+    if (!event_id) return null;
+
+    // Step 2: Poll for result
+    const resultRes = await fetch(`${HF_EVENT_IMPACT_URL}/${event_id}`, {
+      signal: AbortSignal.timeout(HF_TIMEOUT_MS)
+    });
+    if (!resultRes.ok) return null;
+
+    const rawText = await resultRes.text();
+    // Gradio SSE format: "event: complete\ndata: [...]"
+    const dataLine = rawText.split("\n").find(line => line.startsWith("data: "));
+    if (!dataLine) return null;
+
+    const parsed = JSON.parse(dataLine.replace("data: ", ""));
+    // parsed = [{ tech: -0.05, financials: ..., ... }, 65]
+    if (!Array.isArray(parsed) || parsed.length < 2) return null;
+
+    const sectorImpacts = parsed[0];
+    const confidence = parsed[1];
+
+    return { sector_impacts: sectorImpacts, confidence };
+  } catch (err) {
+    console.warn(`[ML] HF API error: ${err.message}`);
+    return null;
+  }
+}
+
+
+// ── Keyword Fallback (used when ML model is unreachable) ─────────────
+
 const SECTOR_IMPACT_RULES = {
   // Geopolitical / Oil
   oil:          { energy: +0.12, bonds: -0.03, tech: -0.04, commodities: +0.08, international: -0.05 },
@@ -62,29 +190,11 @@ const SECTOR_IMPACT_RULES = {
   oversupply:   { energy: -0.12, commodities: -0.06 }
 };
 
-// Confidence mapping by category + keyword match count
-function computeConfidence(event, matchedKeywords) {
-  let base = 50;
-  // More keyword matches → higher confidence
-  base += Math.min(matchedKeywords.length * 10, 30);
-  // Category adjustments
-  if (event.category === "earnings") base += 10;   // Earnings are concrete
-  if (event.category === "macro") base += 5;
-  if (event.category === "geopolitical") base -= 5; // More uncertain
-  if (event.category === "policy") base += 8;
-  // Cap at 95
-  return Math.min(Math.max(base, 20), 95);
-}
-
-/**
- * Analyze a single news event → produce sector impact metrics
- */
-export function analyzeEvent(event) {
-  const text = `${event.headline} ${event.body} ${event.keywords.join(" ")}`.toLowerCase();
+function keywordFallback(event) {
+  const text = `${event.headline} ${event.body || ""} ${(event.keywords || []).join(" ")}`.toLowerCase();
   const sectorImpacts = {};
   const matchedKeywords = [];
 
-  // Match keywords and accumulate sector impacts
   for (const [keyword, impacts] of Object.entries(SECTOR_IMPACT_RULES)) {
     if (text.includes(keyword)) {
       matchedKeywords.push(keyword);
@@ -94,29 +204,79 @@ export function analyzeEvent(event) {
     }
   }
 
-  // Handle bearish hints by flipping positive impacts
-  if (event.raw_sentiment_hint === "bearish" && matchedKeywords.length > 0) {
+  // Sentiment-based amplification/dampening
+  if (matchedKeywords.length > 0 && event.raw_sentiment_hint) {
     for (const sector of Object.keys(sectorImpacts)) {
-      // Only amplify negative, don't flip
+      const impact = sectorImpacts[sector];
+      if (event.raw_sentiment_hint === "bearish") {
+        sectorImpacts[sector] = impact < 0 ? impact * 1.3 : impact * 0.7;
+      } else if (event.raw_sentiment_hint === "bullish") {
+        sectorImpacts[sector] = impact > 0 ? impact * 1.3 : impact * 0.7;
+      }
     }
   }
 
-  // Clamp impacts to reasonable range
   for (const sector of Object.keys(sectorImpacts)) {
     sectorImpacts[sector] = Math.max(-0.40, Math.min(0.40, sectorImpacts[sector]));
   }
 
-  const confidence = computeConfidence(event, matchedKeywords);
+  // Compute confidence from keyword match count + category
+  let confidence = 50;
+  confidence += Math.min(matchedKeywords.length * 10, 30);
+  if (event.category === "earnings") confidence += 10;
+  if (event.category === "macro") confidence += 5;
+  if (event.category === "geopolitical") confidence -= 5;
+  if (event.category === "policy") confidence += 8;
+  confidence = Math.min(Math.max(confidence, 20), 95);
 
-  // Determine overall sentiment from net impact
-  const netImpact = Object.values(sectorImpacts).reduce((s, v) => s + v, 0);
+  return { sector_impacts: sectorImpacts, confidence, matched_keywords: matchedKeywords };
+}
+
+
+/**
+ * Analyze a single news event → produce sector impact metrics.
+ * Tries ML model first, falls back to keyword rules.
+ */
+export async function analyzeEvent(event) {
+  const description = event.body || "";
+
+  // Try ML model first
+  let mlResult = await callMLModel(event.headline, description);
+  let source = "ml_model";
+  let matchedKeywords = [];
+
+  if (mlResult) {
+    // ML succeeded — use its sector impacts and confidence
+    console.log(`[ML] ✅ ${event.headline.substring(0, 50)}... → confidence: ${mlResult.confidence}`);
+  } else {
+    // ML failed — fall back to keyword rules
+    console.warn(`[ML] ⚠️  Fallback to keywords for: ${event.headline.substring(0, 50)}...`);
+    const fallback = keywordFallback(event);
+    mlResult = { sector_impacts: fallback.sector_impacts, confidence: fallback.confidence };
+    matchedKeywords = fallback.matched_keywords;
+    source = "keyword_fallback";
+  }
+
+  const sectorImpacts = mlResult.sector_impacts;
+  const confidence = Math.min(Math.max(Math.round(mlResult.confidence), 20), 95);
+
+  // Filter out near-zero impacts (< 0.5%)
+  const filteredImpacts = {};
+  for (const [sector, val] of Object.entries(sectorImpacts)) {
+    if (Math.abs(val) > 0.005) {
+      filteredImpacts[sector] = parseFloat(val.toFixed(4));
+    }
+  }
+
+  // Derive sentiment from net impact
+  const netImpact = Object.values(filteredImpacts).reduce((s, v) => s + v, 0);
   let sentiment;
   if (netImpact > 0.05) sentiment = "BULLISH";
   else if (netImpact < -0.05) sentiment = "BEARISH";
   else sentiment = "MIXED";
 
-  // Severity based on max absolute impact
-  const maxImpact = Math.max(...Object.values(sectorImpacts).map(Math.abs), 0);
+  // Severity from max absolute impact
+  const maxImpact = Math.max(...Object.values(filteredImpacts).map(Math.abs), 0);
   let severity;
   if (maxImpact >= 0.15) severity = "HIGH";
   else if (maxImpact >= 0.08) severity = "MEDIUM";
@@ -129,9 +289,10 @@ export function analyzeEvent(event) {
     sentiment,
     confidence,
     severity,
-    sector_impacts: sectorImpacts,
+    sector_impacts: filteredImpacts,
     matched_keywords: matchedKeywords,
-    net_impact: parseFloat(netImpact.toFixed(4))
+    net_impact: parseFloat(netImpact.toFixed(4)),
+    source   // "ml_model" or "keyword_fallback"
   };
 }
 
@@ -192,44 +353,245 @@ export function computePortfolioImpact(client, sectorImpacts, confidence) {
 
 
 // ══════════════════════════════════════════════════════════════════════
-// 3. VaR CALCULATION
+// 3. RISK METRICS — VaR, Volatility, Beta, Max Drawdown, Concentration
+//    Uses proper financial formulas on simulated daily returns derived
+//    from each holding's beta and realistic market volatility.
 // ══════════════════════════════════════════════════════════════════════
 
+// ── Deterministic PRNG (reproducible per client) ─────────────────────
 function seededRand(seed) {
   let s = seed;
   return () => { s = (s * 16807) % 2147483647; return (s - 1) / 2147483646; };
 }
 
+// ── Generate realistic simulated daily returns ───────────────────────
+// Uses each holding's beta × market return + idiosyncratic noise.
+// Market volatility calibrated to ~16% annualized (realistic S&P).
+const MARKET_DAILY_VOL = 0.01;  // ~16% annualized (0.01 * sqrt(252) ≈ 0.159)
+const IDIO_DAILY_VOL = 0.008;   // stock-specific noise
+
+function generateMarketReturns(rand, days = 500) {
+  return Array.from({ length: days }, () => (rand() - 0.5) * 2 * MARKET_DAILY_VOL);
+}
+
 function generatePortfolioReturns(client, days = 500) {
   const rand = seededRand(1337 + client.client_id.charCodeAt(3));
-  const mkt = Array.from({ length: days }, () => (rand() - 0.5) * 0.018);
+  const mkt = generateMarketReturns(rand, days);
+
   return Array.from({ length: days }, (_, i) => {
     let r = 0;
     for (const [t, w] of Object.entries(client.holdings)) {
       const beta = TICKERS[t]?.beta || 0;
-      r += w * (beta * mkt[i] + (rand() - 0.5) * 0.012);
+      r += w * (beta * mkt[i] + (rand() - 0.5) * 2 * IDIO_DAILY_VOL);
     }
     return r;
   });
 }
 
-export function computeVaR(client) {
-  const returns = generatePortfolioReturns(client);
-  const sorted = [...returns].sort((a, b) => a - b);
-  const n = sorted.length;
-  const i95 = Math.floor(n * 0.05);
-  const i99 = Math.floor(n * 0.01);
-  const tail = sorted.slice(0, i95);
-  const cvar = tail.length
-    ? -(tail.reduce((s, r) => s + r, 0) / tail.length) * client.portfolio_value
-    : 0;
+// ── Volatility: annualized std of portfolio returns ──────────────────
+//    σ_p = std(daily_returns) × √252
+function calculateVolatility(returns) {
+  const n = returns.length;
+  if (n < 2) return 0;
+  const mean = returns.reduce((s, r) => s + r, 0) / n;
+  const variance = returns.reduce((s, r) => s + (r - mean) ** 2, 0) / (n - 1);
+  return Math.sqrt(variance) * Math.sqrt(252);
+}
+
+// ── Beta: cov(portfolio, market) / var(market) ───────────────────────
+function calculateBeta(portfolioReturns, marketReturns) {
+  const n = Math.min(portfolioReturns.length, marketReturns.length);
+  if (n < 2) return 0;
+  const pSlice = portfolioReturns.slice(0, n);
+  const mSlice = marketReturns.slice(0, n);
+  const pMean = pSlice.reduce((s, r) => s + r, 0) / n;
+  const mMean = mSlice.reduce((s, r) => s + r, 0) / n;
+
+  let covariance = 0, marketVariance = 0;
+  for (let i = 0; i < n; i++) {
+    covariance += (pSlice[i] - pMean) * (mSlice[i] - mMean);
+    marketVariance += (mSlice[i] - mMean) ** 2;
+  }
+  return marketVariance === 0 ? 0 : covariance / marketVariance;
+}
+
+// ── Max Drawdown: cumulative peak-to-trough ──────────────────────────
+function calculateMaxDrawdown(returns) {
+  if (returns.length === 0) return 0;
+  let cumulative = 1, peak = 1, maxDD = 0;
+  for (const r of returns) {
+    cumulative *= (1 + r);
+    if (cumulative > peak) peak = cumulative;
+    const dd = (cumulative - peak) / peak;
+    if (dd < maxDD) maxDD = dd;
+  }
+  return maxDD;  // negative (e.g. -0.15 = -15%)
+}
+
+// ── VaR: historical 5th/1st percentile with linear interpolation ─────
+function percentileValue(sorted, p) {
+  const idx = p * (sorted.length - 1);
+  const lo = Math.floor(idx), hi = Math.ceil(idx);
+  const frac = idx - lo;
+  return lo === hi ? sorted[lo] : sorted[lo] * (1 - frac) + sorted[hi] * frac;
+}
+
+// ── Concentration Metrics ────────────────────────────────────────────
+function calculateConcentration(client) {
+  const weights = Object.values(client.holdings);
+
+  // HHI = sum(w^2) — lower is more diversified
+  const hhi = weights.reduce((s, w) => s + w * w, 0);
+
+  // Effective number of assets = 1/HHI
+  const effectiveAssets = hhi === 0 ? 0 : 1 / hhi;
+
+  // Top 3 concentration
+  const sorted = [...weights].sort((a, b) => b - a);
+  const top3 = sorted.slice(0, 3).reduce((s, w) => s + w, 0);
+
+  // Sector breakdown
+  const sectorExposure = {};
+  for (const [ticker, weight] of Object.entries(client.holdings)) {
+    const sec = TICKERS[ticker]?.sector || "other";
+    sectorExposure[sec] = (sectorExposure[sec] || 0) + weight;
+  }
+
+  return { hhi, effectiveAssets, top3Concentration: top3, sectorExposure };
+}
+
+// ── Risk Level: composite of volatility, VaR, drawdown ──────────────
+function calculateRiskLevel(volatility, var95Pct, maxDrawdown) {
+  let score = 0;
+  if (volatility > 0.30) score += 2;
+  else if (volatility > 0.20) score += 1;
+  if (var95Pct < -0.03) score += 2;
+  else if (var95Pct < -0.02) score += 1;
+  if (maxDrawdown < -0.25) score += 2;
+  else if (maxDrawdown < -0.15) score += 1;
+  if (score >= 4) return "HIGH";
+  if (score >= 2) return "MEDIUM";
+  return "LOW";
+}
+
+// ── Risk Drivers: human-readable reasons ─────────────────────────────
+function getRiskDrivers(sectorExposure, volatility, beta, top3) {
+  const drivers = [];
+  for (const [sector, weight] of Object.entries(sectorExposure)) {
+    if (weight > 0.30) drivers.push(`High ${sector} concentration (${(weight * 100).toFixed(0)}%)`);
+  }
+  if (volatility > 0.25) drivers.push("High portfolio volatility");
+  if (beta > 1.2) drivers.push("High market sensitivity (beta > 1.2)");
+  if (top3 > 0.50) drivers.push("Heavy concentration in top 3 holdings");
+  return drivers;
+}
+
+
+/**
+ * Compute full risk metrics for a client portfolio.
+ * Calls 2 ML models: Volatility/VaR (GARCH) + Risk Scorer, both with fallback.
+ * @param {object} client - client object with holdings, portfolio_value, etc.
+ * @param {string} [severity="LOW"] - event severity for GARCH model ("LOW"/"MEDIUM"/"HIGH")
+ * Returns VaR, CVaR, volatility, beta, max drawdown, concentration, risk level.
+ */
+export async function computeVaR(client, severity = "LOW") {
+  const rand = seededRand(1337 + client.client_id.charCodeAt(3));
+  const marketReturns = generateMarketReturns(rand);
+  const portfolioReturns = generatePortfolioReturns(client);
+
+  // Concentration (needed by both ML models + risk drivers)
+  const concentration = calculateConcentration(client);
+  const sectorWeights = RISK_SCORER_SECTORS.map(sec => {
+    const raw = concentration.sectorExposure[sec] || 0;
+    return parseFloat(raw.toFixed(4));
+  });
+
+  // ── Call both ML models in parallel ────────────────────────────────
+  const [volResult, riskResult] = await Promise.all([
+    callVolatilityML(sectorWeights, client.portfolio_value, "1", severity),
+    callRiskScorerML(sectorWeights)
+  ]);
+
+  // ── Volatility & VaR: prefer ML (GARCH), fallback to simulated ────
+  let var95, var99, cvar95, volatility, volatilityPct, volSource;
+
+  if (volResult) {
+    // ML GARCH model returns daily vol% and dollar VaR
+    const dailyVol = volResult.vol_pct / 100;  // e.g. 0.767% → 0.00767
+    volatility = parseFloat((dailyVol * Math.sqrt(252)).toFixed(4));  // annualized
+    volatilityPct = parseFloat((volatility * 100).toFixed(2));
+    var95 = Math.round(volResult.var_95);
+    var99 = Math.round(volResult.var_99);
+    // CVaR ≈ VaR95 × 1.16 (normal approximation for Expected Shortfall)
+    cvar95 = Math.round(volResult.var_95 * 1.16);
+    volSource = "ml_garch";
+    console.log(`[ML] ✅ Volatility ${client.client_id}: vol=${volatilityPct}% VaR95=$${var95} VaR99=$${var99}`);
+  } else {
+    // Fallback: simulated returns
+    const sorted = [...portfolioReturns].sort((a, b) => a - b);
+    const var95Pct = percentileValue(sorted, 0.05);
+    const var99Pct = percentileValue(sorted, 0.01);
+    const i95 = Math.floor(sorted.length * 0.05);
+    const tail = sorted.slice(0, i95);
+
+    volatility = parseFloat(calculateVolatility(portfolioReturns).toFixed(4));
+    volatilityPct = parseFloat((volatility * 100).toFixed(2));
+    var95 = Math.round(-var95Pct * client.portfolio_value);
+    var99 = Math.round(-var99Pct * client.portfolio_value);
+    cvar95 = tail.length > 0
+      ? Math.round(-(tail.reduce((s, r) => s + r, 0) / tail.length) * client.portfolio_value)
+      : 0;
+    volSource = "simulated_fallback";
+    console.warn(`[ML] ⚠️  Volatility fallback for ${client.client_id}`);
+  }
+
+  // ── Beta & Drawdown (always from simulated — no ML replacement) ────
+  const beta = calculateBeta(portfolioReturns, marketReturns);
+  const maxDrawdown = calculateMaxDrawdown(portfolioReturns);
+  const riskDrivers = getRiskDrivers(
+    concentration.sectorExposure, volatility, beta, concentration.top3Concentration
+  );
+
+  // ── Risk Scorer ML: risk_score (0-100) + category ─────────────────
+  let riskScore, riskCategory, riskSource;
+
+  if (riskResult) {
+    riskScore = riskResult.risk_score;
+    riskCategory = riskResult.risk_category;
+    riskSource = "ml_model";
+    console.log(`[ML] ✅ Risk score ${client.client_id}: ${riskScore} (${riskCategory})`);
+  } else {
+    const sorted = [...portfolioReturns].sort((a, b) => a - b);
+    const var95Pct = percentileValue(sorted, 0.05);
+    const riskLevel = calculateRiskLevel(volatility, var95Pct, maxDrawdown);
+    riskCategory = riskLevel;
+    riskScore = riskLevel === "HIGH" ? 65 : riskLevel === "MEDIUM" ? 40 : 20;
+    riskSource = "rule_fallback";
+    console.warn(`[ML] ⚠️  Risk scorer fallback for ${client.client_id}: ${riskScore} (${riskCategory})`);
+  }
 
   return {
-    var_95: Math.round(-sorted[i95] * client.portfolio_value),
-    var_99: Math.round(-sorted[i99] * client.portfolio_value),
-    cvar_95: Math.round(cvar),
-    worst_day_pct: parseFloat((sorted[0] * 100).toFixed(2)),
-    worst_day_dollar: Math.round(sorted[0] * client.portfolio_value)
+    var_95: var95,
+    var_99: var99,
+    cvar_95: cvar95,
+
+    volatility: volatility,
+    volatility_pct: volatilityPct,
+    vol_source: volSource,
+    beta: parseFloat(beta.toFixed(3)),
+    max_drawdown_pct: parseFloat((maxDrawdown * 100).toFixed(2)),
+    risk_score: riskScore,
+    risk_category: riskCategory,
+    risk_level: riskCategory,  // backward compat alias
+    risk_source: riskSource,
+    risk_drivers: riskDrivers,
+
+    hhi: parseFloat(concentration.hhi.toFixed(4)),
+    effective_assets: parseFloat(concentration.effectiveAssets.toFixed(1)),
+    top_3_concentration_pct: parseFloat((concentration.top3Concentration * 100).toFixed(1)),
+    sector_exposure: Object.fromEntries(
+      Object.entries(concentration.sectorExposure).map(([k, v]) => [k, parseFloat((v * 100).toFixed(1))])
+    )
   };
 }
 
@@ -386,12 +748,14 @@ function aggregateSectorImpacts(eventMetrics) {
  * Run the full analytics pipeline on a batch of news events.
  * Returns structured metrics ready for the AI agent.
  */
-export function runAnalytics(newsEvents) {
+export async function runAnalytics(newsEvents) {
   console.log(`\n[Analytics] Processing ${newsEvents.length} events...`);
 
-  // 1. Classify and compute sector impacts for each event
-  const eventMetrics = newsEvents.map(event => analyzeEvent(event));
-  console.log(`[Analytics] Event classification complete`);
+  // 1. Classify via ML model (parallel calls to HF Spaces)
+  const eventMetrics = await Promise.all(newsEvents.map(event => analyzeEvent(event)));
+  const mlCount = eventMetrics.filter(e => e.source === "ml_model").length;
+  const fbCount = eventMetrics.filter(e => e.source === "keyword_fallback").length;
+  console.log(`[Analytics] Event classification complete (${mlCount} ML, ${fbCount} fallback)`);
 
   // 2. Aggregate sector impacts using quant-grade normalization
   //    (NOT simple addition — that causes unrealistic explosions)
@@ -399,10 +763,16 @@ export function runAnalytics(newsEvents) {
 
   // 3. Compute per-client portfolio impacts
   const avgConfidence = eventMetrics.reduce((s, e) => s + e.confidence, 0) / eventMetrics.length;
-  const clientImpacts = CLIENTS.map(client => ({
+
+  // Determine dominant event severity for GARCH volatility model
+  const highCount = eventMetrics.filter(e => e.severity === "HIGH").length;
+  const medCount = eventMetrics.filter(e => e.severity === "MEDIUM").length;
+  const dominantSeverity = highCount > 0 ? "HIGH" : medCount > 0 ? "MEDIUM" : "LOW";
+
+  const clientImpacts = await Promise.all(CLIENTS.map(async client => ({
     ...computePortfolioImpact(client, aggregatedSectorImpacts, avgConfidence),
-    var_metrics: computeVaR(client)
-  }));
+    var_metrics: await computeVaR(client, dominantSeverity)
+  })));
 
   // Sort by absolute impact (most affected first)
   clientImpacts.sort((a, b) => Math.abs(b.total_impact_pct) - Math.abs(a.total_impact_pct));

@@ -74,28 +74,41 @@ async function callLLM(messages, tools = null) {
     body.tool_choice = "auto";
   }
 
-  try {
-    const res = await fetch(OPENROUTER_URL, {
-      method: "POST",
-      headers: {
-        "Content-Type": "application/json",
-        "Authorization": `Bearer ${OPENROUTER_API_KEY}`,
-        "HTTP-Referer": "http://localhost:3001",
-        "X-Title": "LPL Advisor Copilot Agent"
-      },
-      body: JSON.stringify(body)
-    });
+  // Retry up to 2 times on empty/failed responses (free models are flaky)
+  for (let attempt = 1; attempt <= 2; attempt++) {
+    try {
+      const res = await fetch(OPENROUTER_URL, {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          "Authorization": `Bearer ${OPENROUTER_API_KEY}`,
+          "HTTP-Referer": "http://localhost:3001",
+          "X-Title": "LPL Advisor Copilot Agent"
+        },
+        body: JSON.stringify(body)
+      });
 
-    if (!res.ok) {
-      const errText = await res.text();
-      console.error(`[Agent] HTTP ${res.status}:`, errText);
-      throw new Error(`OpenRouter API error ${res.status}: ${errText}`);
+      if (!res.ok) {
+        const errText = await res.text();
+        console.error(`[Agent] HTTP ${res.status}:`, errText);
+        if (attempt < 2) { console.log(`[Agent] Retrying... (attempt ${attempt + 1})`); await new Promise(r => setTimeout(r, 2000)); continue; }
+        throw new Error(`OpenRouter API error ${res.status}: ${errText}`);
+      }
+
+      const json = await res.json();
+
+      // Check for empty response (common with free models)
+      if (!json.choices || json.choices.length === 0) {
+        console.error(`[Agent] Empty choices from LLM. Error:`, json.error || "none");
+        if (attempt < 2) { console.log(`[Agent] Retrying... (attempt ${attempt + 1})`); await new Promise(r => setTimeout(r, 3000)); continue; }
+      }
+
+      return json;
+    } catch (err) {
+      console.error(`[Agent] Fetch error (attempt ${attempt}):`, err.message);
+      if (attempt < 2) { await new Promise(r => setTimeout(r, 2000)); continue; }
+      throw err;
     }
-
-    return res.json();
-  } catch (err) {
-    console.error(`[Agent] Fetch error:`, err.message);
-    throw err;
   }
 }
 
@@ -220,7 +233,12 @@ function buildUserMessage(analytics) {
     msg += `- Total impact: ${ci.total_impact_pct > 0 ? "+" : ""}${ci.total_impact_pct}% ($${ci.total_impact_dollar.toLocaleString()})\n`;
     msg += `- Confidence-weighted impact: ${ci.effective_impact_pct > 0 ? "+" : ""}${ci.effective_impact_pct}%\n`;
     msg += `- Threshold (${ci.risk_tolerance}): ±${ci.threshold_pct}% → ${ci.exceeds_threshold ? "⚠️ BREACHED" : "✅ Within limits"}\n`;
-    msg += `- VaR(95%): $${ci.var_metrics.var_95.toLocaleString()} | VaR(99%): $${ci.var_metrics.var_99.toLocaleString()}\n`;
+    msg += `- VaR(95%): $${ci.var_metrics.var_95.toLocaleString()} | VaR(99%): $${ci.var_metrics.var_99.toLocaleString()} | CVaR: $${ci.var_metrics.cvar_95.toLocaleString()}\n`;
+    msg += `- Volatility: ${ci.var_metrics.volatility_pct}% | Beta: ${ci.var_metrics.beta} | Max Drawdown: ${ci.var_metrics.max_drawdown_pct}% | Risk Level: ${ci.var_metrics.risk_level}\n`;
+    if (ci.var_metrics.risk_drivers && ci.var_metrics.risk_drivers.length > 0) {
+      msg += `- Risk drivers: ${ci.var_metrics.risk_drivers.join("; ")}\n`;
+    }
+    msg += `- Concentration: HHI=${ci.var_metrics.hhi} | Effective assets=${ci.var_metrics.effective_assets} | Top-3=${ci.var_metrics.top_3_concentration_pct}%\n`;
     if (ci.holding_impacts.length > 0) {
       msg += `- Top affected holdings:\n`;
       for (const h of ci.holding_impacts.slice(0, 5)) {

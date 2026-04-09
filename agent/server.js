@@ -6,7 +6,7 @@ dotenv.config();
 
 import express from "express";
 import cors from "cors";
-import { connectDB, getLatestInsights, getActiveAlerts, getAllAlerts, getPipelineRuns, dismissAlert } from "./db.js";
+import { connectDB, getLatestInsights, getActiveAlerts, getAllAlerts, getPipelineRuns, dismissAlert, getClientSnapshots, getLatestSnapshots } from "./db.js";
 import { runPipeline } from "./pipeline.js";
 import { CLIENTS, TICKERS } from "./data/sample_data.js";
 import { computeVaR } from "./analytics_engine.js";
@@ -76,6 +76,28 @@ app.get("/api/pipeline-runs", async (req, res) => {
   }
 });
 
+// Get analytics snapshots for a specific client (last 20)
+app.get("/api/analytics-snapshots/:clientId", async (req, res) => {
+  try {
+    const { limit } = req.query;
+    const snapshots = await getClientSnapshots(req.params.clientId, parseInt(limit) || 20);
+    res.json(snapshots);
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// Get latest analytics snapshot for every client (one each)
+app.get("/api/analytics-latest", async (req, res) => {
+  try {
+    const snapshots = await getLatestSnapshots();
+    if (snapshots.length === 0) return res.json({ message: "No analytics snapshots yet. Run the pipeline first." });
+    res.json(snapshots);
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
 // Get clients list
 app.get("/api/clients", (req, res) => {
   res.json(CLIENTS.map(c => ({
@@ -84,6 +106,72 @@ app.get("/api/clients", (req, res) => {
     portfolio_value: c.portfolio_value,
     risk_tolerance: c.risk_tolerance
   })));
+});
+
+// Get full client portfolio details (holdings, sectors, risk metrics)
+app.get("/api/clients/:clientId", async (req, res) => {
+  try {
+    const client = CLIENTS.find(c => c.client_id === req.params.clientId);
+    if (!client) return res.status(404).json({ error: "Client not found" });
+
+    const holdings = Object.entries(client.holdings).map(([ticker, weight]) => ({
+      ticker,
+      name: TICKERS[ticker]?.name || ticker,
+      sector: TICKERS[ticker]?.sector || "unknown",
+      weight_pct: parseFloat((weight * 100).toFixed(1)),
+      value: Math.round(weight * client.portfolio_value),
+      beta: TICKERS[ticker]?.beta || 0
+    }));
+
+    const sectorBreakdown = {};
+    for (const h of holdings) {
+      sectorBreakdown[h.sector] = (sectorBreakdown[h.sector] || 0) + h.weight_pct;
+    }
+
+    const varMetrics = await computeVaR(client);
+
+    // Get latest insights and alerts for this client
+    const [allAlerts, allInsights] = await Promise.all([
+      getAllAlerts(),
+      getLatestInsights(req.params.clientId)
+    ]);
+    const clientAlerts = allAlerts.filter(a => a.client_id === req.params.clientId);
+    const clientInsights = allInsights.filter(i => i.client_id === req.params.clientId);
+
+    res.json({
+      client_id: client.client_id,
+      name: client.name,
+      age: client.age,
+      portfolio_value: client.portfolio_value,
+      risk_tolerance: client.risk_tolerance,
+      time_horizon_years: client.time_horizon_years,
+      holdings,
+      sector_breakdown: sectorBreakdown,
+      risk_metrics: {
+        var_95: varMetrics.var_95,
+        var_99: varMetrics.var_99,
+        cvar_95: varMetrics.cvar_95,
+        volatility_pct: varMetrics.volatility_pct,
+        vol_source: varMetrics.vol_source,
+        beta: varMetrics.beta,
+        max_drawdown_pct: varMetrics.max_drawdown_pct,
+        risk_score: varMetrics.risk_score,
+        risk_category: varMetrics.risk_category,
+        risk_level: varMetrics.risk_level,
+        risk_source: varMetrics.risk_source,
+        risk_drivers: varMetrics.risk_drivers,
+        hhi: varMetrics.hhi,
+        effective_assets: varMetrics.effective_assets,
+        top_3_concentration_pct: varMetrics.top_3_concentration_pct,
+        sector_exposure: varMetrics.sector_exposure
+      },
+      alerts: clientAlerts,
+      insights: clientInsights.slice(0, 5)
+    });
+  } catch (err) {
+    console.error(`[Server] Client detail error:`, err.message);
+    res.status(500).json({ error: err.message });
+  }
 });
 
 // Manually trigger pipeline

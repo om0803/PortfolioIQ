@@ -1,7 +1,7 @@
 // ── API helper functions ─────────────────────────────────────────────
 // All calls go to /api/* which Next.js rewrites to localhost:3001
 
-import type { Alert, Insight, PipelineRun, Client } from "@/types";
+import type { Alert, Insight, PipelineRun, Client, ClientDetails, AnalyticsSnapshot } from "@/types";
 
 const headers = { "Content-Type": "application/json" };
 
@@ -26,8 +26,20 @@ export async function fetchClients(): Promise<Client[]> {
   return res.json();
 }
 
+export async function fetchClientDetails(clientId: string): Promise<ClientDetails> {
+  const res = await fetch(`/api/clients/${clientId}`);
+  if (!res.ok) throw new Error(`Failed to fetch client details: ${res.status}`);
+  return res.json();
+}
+
+export async function fetchClientSnapshots(clientId: string, limit = 20): Promise<AnalyticsSnapshot[]> {
+  const res = await fetch(`/api/analytics-snapshots/${clientId}?limit=${limit}`);
+  if (!res.ok) throw new Error(`Failed to fetch snapshots: ${res.status}`);
+  return res.json();
+}
+
 export async function fetchPipelineRuns(limit = 10): Promise<PipelineRun[]> {
-  const res = await fetch("/api/pipeline-runs");
+  const res = await fetch(`/api/pipeline-runs?limit=${limit}`);
   if (!res.ok) throw new Error(`Failed to fetch pipeline runs: ${res.status}`);
   return res.json();
 }
